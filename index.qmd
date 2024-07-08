@@ -1,0 +1,279 @@
+---
+title: "Registros de presencia de reptiles de la familia Iguanidae en Costa Rica"
+author: "Jarod Salas (G1) y Kevin Córdoba (G2)"
+format: dashboard
+server: shiny
+---
+
+```{r}
+#| label: carga-paquetes
+#| context: setup
+#| warning: false
+#| message: false
+
+
+# Carga de paquetes
+library(tidyverse)
+library(DT)
+library(plotly)
+library(sf)
+library(leaflet)
+library(leafem)
+library(leaflet.extras)
+library(shiny)
+library(rsconnect)
+```
+
+
+```{r}
+#| label: carga--datos
+#| context: data
+
+
+# Carga de datos
+
+# Registros de reptiles
+registros <-
+  st_read(
+    dsn = "registros-reptiles.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+# Asignación del CRS WGS84 
+st_crs(registros) <- 4326
+
+# Para asegurarse de que la columna year sea numérica
+registros$year <- as.integer(registros$year)
+
+# Especies
+especies <-
+  read_csv2("especies-reptiles.csv")
+
+# Regiones socioeconómicas
+regiones <-
+  st_read("regiones-socioeconomicas.gpkg", quiet = TRUE)
+
+
+# Uniones de datos
+
+# Registros de presencia + Especies
+registros_union_especies <-
+  left_join(
+    x = registros,
+    y = especies,
+    by = "species"
+  )
+
+# Registros de presencia + Especies + Regiones
+registros_union_especies_regiones <-
+  st_join(
+    x = registros_union_especies,
+    y = dplyr::select(regiones, region),
+    join = st_within
+  )
+```
+
+
+# {.sidebar}
+
+```{r}
+#| label: panel-widgets-entrada
+
+
+# Lista ordenada de especies
+# con un elemento adicional = "Todas"
+lista_especies <- unique(registros_union_especies_regiones$species)
+lista_especies <- sort(lista_especies)
+lista_especies <- c("Todas", lista_especies)
+
+# Widget de lista de selección de especies
+selectInput(
+  inputId = "especie",      # identificador del widget
+  label = "Especie",        # etiqueta de la lista
+  choices = lista_especies, # lista de opciones para seleccionar de la lista
+  selected = "Todas"        # opción seleccionada por defecto
+)
+
+
+# Año mínimo y máximo
+año_minimo <- min(registros_union_especies_regiones$year, na.rm = TRUE)
+año_maximo <- max(registros_union_especies_regiones$year, na.rm = TRUE)
+
+
+# Widget deslizador de selección de año
+sliderInput(
+  inputId = "year",
+  label = "Año",
+  min = año_minimo,
+  max = trunc(año_maximo),
+  value = c(1801, 2024)
+)
+
+```
+
+# Lista de registros y gráfico de cantidad de registros por especie
+
+```{r}
+#| label: salida-tabla
+#| title: "Lista de registros de presencia"
+
+
+# Tabla interactiva
+dataTableOutput(
+	outputId =  "tabla" # identificador del widget
+)
+```
+
+```{r}
+#| label: salida-grafico
+#| title: "Cantidad de registros de presencia por especie"
+
+
+# Gráfico interactiva
+plotlyOutput(
+	outputId =  "grafico" # identificador del widget
+)
+```
+
+# Mapa interactivo de cantidad de registros por especie
+
+```{r}
+#| label: salida-mapa
+#| title: "Distribución espacial de registros de presencia"
+
+
+# Mapa interactivo
+leafletOutput(
+	outputId =  "mapa" # identificador del widget
+)
+```
+
+
+```{r}
+#| label: servidor
+#| context: server
+
+# Función reactiva para filtrar los registros de presencia
+# de acuerdo con los filtros especificados por el usuario
+filtrar_registros <- reactive({
+  # Valor inicial del objeto que va a retornarse
+  registros_filtrados <- registros_union_especies_regiones
+  
+  # Se realiza el filtro, solamente si el usario ha seleccionado 
+  # una opción diferente a "Todas" en la lista de selección de especies
+  if (input$especie != "Todas") {
+    registros_filtrados <-
+      registros_filtrados |>
+      filter(species == input$especie)
+    
+  }
+  
+  # Filtro por año mínimo
+  registros_filtrados <-
+    registros_filtrados |>
+    filter(year >= input$year[1])
+  
+    # Filtro por año máximo
+  registros_filtrados <-
+    registros_filtrados |>
+    filter(year <= input$year[2])
+
+  return(registros_filtrados)
+}) 
+
+# Mapa interactivo de registros de presencia
+output$mapa <- renderLeaflet({
+	# Filtrado del conjunto de datos
+  registros <- filtrar_registros()
+  
+# Colores de la capa de polígonos
+  color_region <- colorFactor(palette = "Dark2", domain = regiones$region)
+  
+# Mapa interactivo
+leaflet() |>
+   setView(
+    lng = -84.21,
+    lat = 9.70,
+    zoom = 8) |>
+addTiles(group = "OpenStreetMap") |>
+addProviderTiles(providers$Esri.OceanBasemap, group = "Mapa de fuentes hídricas") |>
+   addPolygons(
+      data = regiones,
+      color = ~color_region(region),
+      weight = 2,
+      opacity = 0.5,
+      fillOpacity = 0.4,
+      popup = paste0("<strong>Región socioeconómica: </strong>", regiones$region)
+    ) |>
+  addCircleMarkers(
+  group = "Registros de presencia",
+  data = registros,
+  radius = 4.5,
+  color = "red",
+  fillColor = "black",
+  fillOpacity = 1,
+  weight = 1,
+  stroke = TRUE,
+  opacity = 1,
+  popup = paste(
+    paste0("<strong>Especie</strong>: ", registros$species),
+    paste0("<strong>Categoría en la Lista Roja</strong>: ",registros$iucnRedListCategory),
+        paste0("<strong>Región</strong>: ", registros$region),
+        paste0("<strong>Año</strong>: ", registros$year),
+        sep = "<br>"
+    )) |>
+   addLayersControl(
+      baseGroups = c("OpenStreetMap", "Mapa de fuentes hídricas"),  # Agregar las capas base al control de capas
+      overlayGroups = c("Registros de presencia"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) |>
+  addResetMapButton() |>
+  addMouseCoordinates() |>
+  addMiniMap(position = "bottomright") |>
+  addFullscreenControl()
+})
+
+
+# Tabla interactiva de registros de presencia
+output$tabla <- renderDataTable({
+  # Filtrado del conjunto de datos
+  registros <- filtrar_registros()
+  
+  # Tabla interactiva
+  registros |>
+    st_drop_geometry() |>
+    select(species, eventDate, iucnRedListCategory, region) |>
+    datatable(
+      rownames = FALSE,
+      colnames = c("Especies", "Fecha", "Categoría en la Lista Roja", "Región"),
+      options = list(
+        pageLength = 10,
+        language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+      )
+    )
+})
+
+
+# Gráfico interactivo de registros de presencia por especie
+output$grafico <- renderPlotly({
+  # Filtrado del conjunto de datos
+  registros <- filtrar_registros()
+  
+  grafico_ggplot2 <-
+    registros |>
+    st_drop_geometry() |>
+    group_by(species) |>
+    summarize(n = n()) |>
+    ggplot(aes(x = reorder(species, -n),
+               y = n)) +
+    geom_col() +
+    xlab("Especies") +
+    ylab("Cantidad de registros")
+  
+  ggplotly(grafico_ggplot2) |> config(locale = "es")
+  
+})
+```
